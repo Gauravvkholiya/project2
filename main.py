@@ -1,148 +1,70 @@
 import streamlit as st
-import speech_recognition as sr
-from ultralytics import YOLO
-import nltk
-import pyttsx3
-import time
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords
-from collections import namedtuple
 import cv2
-# from streamlit_toggle import st_toggle_switch
-import serial
+import numpy as np
+import time
+from ultralytics import YOLO
 
-model = YOLO("yolov8n.pt")
+# Load YOLOv8 model
+model = YOLO('yolov8n.pt')
 
-# Streamlit state for detected objects
-if 'detected_objects' not in st.session_state:
-    st.session_state.detected_objects = {}
-
-def recognize_speech():
-    recognizer = sr.Recognizer()
-    with sr.Microphone() as source:
-        st.write("Listening...")
-        audio = recognizer.listen(source)
-        text = ""
-        try:
-            text = recognizer.recognize_google(audio)
-            st.write(f"You said: {text}")
-        except sr.UnknownValueError:
-            st.write("Sorry, I did not understand that.")
-        except sr.RequestError:
-            st.write("Sorry, my speech service is down.")
-    return text
-
-def process_question(question):
-    words = word_tokenize(question)
-    words = [word for word in words if word.isalpha()]
-    words = [word.lower() for word in words if word not in stopwords.words('english')]
-    return words
-
-# Define a named tuple for pairs
-Pair = namedtuple('Pair', ['word', 'value'])
-
-def query_json(data, words):
-    results = []  # List to store the results
-    for key, value in data.items():
-        for word in words:
-            if word.lower() in key.lower():
-                results.append(Pair(word, value))
-                break  # Stop searching once a match is found
-    if results:
-        return results
-    return "Sorry, I couldn't find the answer."
-
-def speak_text(text):
-    engine = pyttsx3.init()
-    if not text:
-        engine.say("Not found")
-    else:
-        text_to_be_spoken = ' '.join([f"There are {count} {word}" for word, count in text])
-        engine.say(text_to_be_spoken)
-    engine.runAndWait()
-
-
-
-def capture_and_display():
-    # Open the webcam (0 is the default camera)
-    cap = cv2.VideoCapture(0)
-
-    if not cap.isOpened():
-        st.write("Error: Could not open webcam.")
-        return {}
-
-    # Dictionary to store detected objects and their counts
-    detected_objects = {}
+# Function to perform object detection
+def detect_objects(frame, model):
+    results = model(frame)
+    detections = {}
     
-    #DISTANCE
-    # ser = serial.Serial('COM7', 115200)
+    for result in results:
+        boxes = result.boxes
+        for box in boxes:
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+            label = result.names[box.cls[0].item()]
+            confidence = box.conf[0].item()
+            
+            if label not in detections:
+                detections[label] = []
+            detections[label].append((x1, y1, x2, y2, confidence))
+            
+            # Draw bounding box
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(frame, f'{label} {confidence:.2f}', (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 
+    return frame, detections
 
-    duration = 200  # seconds
-    start_time = time.time()
-    toggle = 0
+# Streamlit app interface
+st.title("Real-Time Video Input with YOLOv8 Object Detection")
 
-    # Placeholder for the image
-    image_placeholder = st.empty()
-    text_placeholder = st.empty()
+# Initialize webcam video stream
+cap = cv2.VideoCapture(0)
 
-    while True:
-        # Capture frame-by-frame
-        ret, frame = cap.read()
+# Dictionary to store detected objects
+detected_objects = {}
 
-        if not ret:
-            st.write("Error: Failed to capture image.")
-            break
-             
-        results = model.predict(source=frame, device='cpu')
+stframe = st.empty()
 
-            # Process detection results
-        for result in results:
-            for box in result.boxes:
-                class_id = box.cls.item()
-                class_name = model.names[class_id]
-                if class_name not in detected_objects:
-                    detected_objects[class_name] = 0
-                detected_objects[class_name] += 1
+# Process the video stream in real-time
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        st.write("Failed to capture video from webcam.")
+        break
 
-        # Get the resulting frame with bounding boxes
-        annotated_frame = results[0].plot()
+    # Perform object detection
+    processed_frame, detections = detect_objects(frame, model)
+    
+    # Update detected objects
+    for label, coords in detections.items():
+        if label in detected_objects:
+            detected_objects[label].extend(coords)
+        else:
+            detected_objects[label] = coords
 
-        # Convert annotated frame to a format Streamlit can display
-        annotated_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+    # Display the processed video
+    stframe.image(processed_frame, channels="BGR")
 
-        # Update the placeholder with the new frame
-        image_placeholder.image(annotated_frame, channels="RGB", use_column_width=True)
+    # To control the frame rate (optional)
+    time.sleep(0.1)
 
-        # if ser.in_waiting > 0:
-        #         line = ser.readline().decode('utf-8').rstrip()
-        #         text_placeholder.write(line)
-        # Check if the duration has passed
-        if time.time() - start_time > duration:
-            break
-        
-    cap.release()
-    st.session_state.detected_objects = detected_objects
-    return detected_objects
+cap.release()
 
-# Streamlit UI
-st.title("Real-time Object Detection and Speech Interaction")
-
-# if st.button("toggle"):
-#     toggle = 1;
-#     st.write("Detected objects after recording:", st.session_state.detected_objects)
-if st.button("Start Recording"):
-    st.write("Recording and detecting objects...")
-    detected_objects = capture_and_display()
-    st.write("Detected objects after recording:", st.session_state.detected_objects)
-
-if st.button("ASK"):
-    st.write("Listening, speak after 2 seconds...")
-    time.sleep(2)  # Allow time for user to prepare
-    text = recognize_speech()
-    st.write("You said:", text)
-    words = process_question(text)
-    st.write("Processed words:", words)
-    ans = query_json(st.session_state.detected_objects, words)
-    speak_text(ans)
-    st.write("Answer:", ans)
+# Display detected objects
+st.write("Detected Objects:")
+st.json(detected_objects)
